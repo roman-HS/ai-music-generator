@@ -1,3 +1,4 @@
+- In Github we don't need to have the `ACE-Step` folder because the backend will run on the cloud (Modal) and when we initialize the container we clone the repo (see `main.py`)
 - The model we will use for music generation is called ACE-Step. The github repo can be found [here](https://github.com/ace-step/ACE-Step). The app diagram shows more details, check out `excalidraw.excalidraw` file in the root of the project
 - In `Modal` we can create Volumes that can be used to store files like model weights and database dumps. We can share these volumes with different images (so we avoid downloading files to each image)
 
