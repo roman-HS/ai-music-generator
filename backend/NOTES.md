@@ -4,5 +4,5 @@
 
 #### main.py notes
 
-- The `MusicGenServer` class is the main class where we have the endpoints that will be consumed in the frontend
-- The `load_models` method will be called when the container is cold and will load the models to the cache
+- The `MusicGenServer` class is the main class where we have the endpoints that will be consumed in the frontend.
+- The `load_models` method will be called when the container is cold and will load the models to the cache.
