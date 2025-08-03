@@ -1,10 +1,23 @@
 import base64
+from typing import List
 import uuid
 import modal
 import os
 
 from pydantic import BaseModel
 import requests
+import boto3
+
+from prompts import LYRICS_GENERATOR_PROMPT, PROMPT_GENERATOR_PROMPT
+
+
+# ------------------------------
+# ------------------------------
+# ------------------------------
+# Container Setup
+# ------------------------------
+# ------------------------------
+# ------------------------------
 
 app = modal.App("music-generator")
 
@@ -29,8 +42,49 @@ hf_volume = modal.Volume.from_name("qwen-hf-cache", create_if_missing=True)
 # Load the secrets from Modal
 music_gen_secrets = modal.Secret.from_name("music-gen-secret")
 
+
+# ------------------------------
+# ------------------------------
+# ------------------------------
+# Schema Models
+# ------------------------------
+# ------------------------------
+# ------------------------------
+
+class AudioGenerationBase(BaseModel):
+  audio_duration: float = 180.0
+  seed: int = -1
+  guidance_scale: float = 15.0
+  infer_step: int = 60
+  instrumental: bool = False
+
+class GenerateMusicFromDescriptionRequest(AudioGenerationBase): # Inherits from AudioGenerationBase so it has all the fields
+  full_described_song: str
+
+class GenerateMusicWithCustomLyricsRequest(AudioGenerationBase): # Inherits from AudioGenerationBase so it has all the fields
+  prompt: str # style of the song
+  lyrics: str # lyrics of the song
+
+class GenerateMusicWithDescribedLyricsRequest(AudioGenerationBase): # Inherits from AudioGenerationBase so it has all the fields
+  prompt: str # style of the song
+  described_lyrics: str # description of the lyrics
+
+class GenerateMusicResponseS3(BaseModel):
+  s3_key: str
+  cover_image_s3_key: str
+  categories: List[str]
+
 class GenerateMusicResponse(BaseModel):
   audio_data: str
+
+
+# ------------------------------
+# ------------------------------
+# ------------------------------
+# Main Server Class
+# ------------------------------
+# ------------------------------
+# ------------------------------
 
 @app.cls(
   image=image,
@@ -80,6 +134,140 @@ class MusicGenServer:
     )
     self.image_pipeline.to("cuda")
 
+  # ------------------------------
+  # ------------------------------
+  # ------------------------------
+  # Utility Functions
+  # ------------------------------
+  # ------------------------------
+  # ------------------------------
+
+  def run_inference_on_qwen(self, question: str):
+    # Use the qwen model (based on documentation found in huggingface)
+    # https://huggingface.co/Qwen/Qwen2-7B-Instruct
+    messages = [
+      {"role": "user", "content": question}
+    ]
+    text = self.tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    model_inputs = self.tokenizer([text], return_tensors="pt").to(self.llm_model.device)
+
+    generated_ids = self.llm_model.generate(
+        model_inputs.input_ids,
+        max_new_tokens=512
+    )
+    generated_ids = [
+        output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+
+    response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return response
+
+  def generate_prompt(self, description: str):
+    #  Insert description into template
+    full_prompt = PROMPT_GENERATOR_PROMPT.format(user_prompt=description)
+
+    #  Run LLM inference and return the result
+    return self.run_inference_on_qwen(full_prompt)
+
+  def generate_lyrics(self, description: str):
+    #  Insert description into template
+    full_prompt = LYRICS_GENERATOR_PROMPT.format(description=description)
+
+    #  Run LLM inference and return the result
+    return self.run_inference_on_qwen(full_prompt)
+
+  def generate_categories(self, description: str) -> List[str]:
+    prompt = f"Based on the following music description, list 3-5 relevant genres or categories as a comma-separated list. For example: Pop, Electronic, Sad, 80s. Description: '{description}'"
+
+    response_text = self.run_inference_on_qwen(prompt)
+
+    # Structure the response into a list of categories
+    categories = [cat.strip() for cat in response_text.split(",") if cat.strip()]
+
+    return categories
+
+  def generate_and_upload_to_s3(
+      self,
+      prompt: str,
+      lyrics: str,
+      instrumental: bool,
+      audio_duration: float,
+      infer_step: int,
+      guidance_scale: float,
+      seed: int,
+      description_for_categories: str,
+  ) -> GenerateMusicResponseS3:
+
+    final_lyrics = "[instrumental]" if instrumental else lyrics
+    print(f"Generated lyrics: \n{final_lyrics}")
+    print(f"Prompt: \n{prompt}")
+
+    s3_client = boto3.client("s3")
+    bucket_name = os.environ["S3_BUCKET_NAME"]
+
+    # ------------------------------
+    # ------------------------------
+    #  Music Generation
+    # ------------------------------
+    # ------------------------------
+    output_dir = "/tmp/outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    song_output_path = os.path.join(output_dir, f"audio-{uuid.uuid4()}.wav")
+
+    self.music_model(
+      prompt=prompt,
+      lyrics=final_lyrics,
+      audio_duration=audio_duration,
+      infer_step=infer_step,
+      guidance_scale=guidance_scale,
+      manual_seed=str(seed),
+      save_path=song_output_path
+    )
+
+    audio_s3_key = f"audio-{uuid.uuid4()}.wav"
+    s3_client.upload_file(song_output_path, bucket_name, audio_s3_key)
+    os.remove(song_output_path)
+
+    # ------------------------------
+    # ------------------------------
+    #  Thumbnail Generation
+    # ------------------------------
+    # ------------------------------
+    thumbnail_prompt = f"{prompt}, album cover art"
+    image = self.image_pipeline(prompt=thumbnail_prompt, num_inference_steps=2, guidance_scale=0.0).images[0]
+
+    thumbnail_output_path = os.path.join(output_dir, f"thumbnail-{uuid.uuid4()}.png")
+    image.save(thumbnail_output_path)
+
+    thumbnail_s3_key = f"thumbnail-{uuid.uuid4()}.png"
+    s3_client.upload_file(thumbnail_output_path, bucket_name, thumbnail_s3_key)
+    os.remove(thumbnail_output_path)
+
+    # ------------------------------
+    # ------------------------------
+    # Category Generation (ex. "hip-hop", "rock", jazz)
+    # ------------------------------
+    # ------------------------------
+    categories = self.generate_categories(description_for_categories)
+
+    return GenerateMusicResponseS3(
+      s3_key=audio_s3_key,
+      cover_image_s3_key=thumbnail_s3_key,
+      categories=categories
+    )
+
+  # ------------------------------
+  # ------------------------------
+  # ------------------------------
+  # Endpoints
+  # ------------------------------
+  # ------------------------------
+  # ------------------------------
+
   @modal.fastapi_endpoint(method="POST")
   def generate_music(self) -> GenerateMusicResponse:
     output_dir = "/tmp/outputs"
@@ -106,6 +294,24 @@ class MusicGenServer:
 
     return GenerateMusicResponse(audio_data=audio_b64)
 
+  @modal.fastapi_endpoint(method="POST")
+  def generate_music_from_description(self, request: GenerateMusicFromDescriptionRequest) -> GenerateMusicResponseS3:
+    # Generete prompt
+    prompt = self.generate_prompt(request.full_described_song)
+
+    # Generete lyrics
+    lyrics = ""
+    if not request.instrumental:
+      lyrics = self.generate_lyrics(request.full_described_song)
+
+
+  @modal.fastapi_endpoint(method="POST")
+  def generate_music_with_lyrics(self, request: GenerateMusicWithCustomLyricsRequest) -> GenerateMusicResponseS3:
+    pass
+
+  @modal.fastapi_endpoint(method="POST")
+  def generate_music_with_described_lyrics(self, request: GenerateMusicWithDescribedLyricsRequest) -> GenerateMusicResponseS3:
+    pass
 
 
 @app.local_entrypoint()

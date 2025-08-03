@@ -6,3 +6,10 @@
 
 - The `MusicGenServer` class is the main class where we have the endpoints that will be consumed in the frontend.
 - The `load_models` method will be called when the container is cold and will load the models to the cache.
+
+#### AWS (S3)
+
+- Thumbnails and songs will be put in the root of the bucket
+- There will be 2 IAM users:
+  - Backend (modal): PutObject, GetObject, ListBucket
+  - Frontend (next-js): GetObject, ListBucket
