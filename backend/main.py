@@ -224,7 +224,7 @@ class MusicGenServer:
       audio_duration=audio_duration,
       infer_step=infer_step,
       guidance_scale=guidance_scale,
-      manual_seed=str(seed),
+      manual_seeds=str(seed),
       save_path=song_output_path
     )
 
@@ -268,7 +268,7 @@ class MusicGenServer:
   # ------------------------------
   # ------------------------------
 
-  @modal.fastapi_endpoint(method="POST")
+  @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
   def generate_music(self) -> GenerateMusicResponse:
     output_dir = "/tmp/outputs"
     os.makedirs(output_dir, exist_ok=True)
@@ -294,7 +294,7 @@ class MusicGenServer:
 
     return GenerateMusicResponse(audio_data=audio_b64)
 
-  @modal.fastapi_endpoint(method="POST")
+  @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
   def generate_music_from_description(self, request: GenerateMusicFromDescriptionRequest) -> GenerateMusicResponseS3:
     # Generete prompt
     prompt = self.generate_prompt(request.full_described_song)
@@ -304,29 +304,68 @@ class MusicGenServer:
     if not request.instrumental:
       lyrics = self.generate_lyrics(request.full_described_song)
 
+    response = self.generate_and_upload_to_s3(
+      prompt=prompt,
+      lyrics=lyrics,
+      description_for_categories=request.full_described_song,
+      **request.model_dump(exclude={"full_described_song"}) # unpack all the fields from the request except for full_described_song
+    )
 
-  @modal.fastapi_endpoint(method="POST")
+    return response
+
+
+  @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
   def generate_music_with_lyrics(self, request: GenerateMusicWithCustomLyricsRequest) -> GenerateMusicResponseS3:
-    pass
 
-  @modal.fastapi_endpoint(method="POST")
+    response = self.generate_and_upload_to_s3(
+      prompt=request.prompt,
+      lyrics=request.lyrics,
+      description_for_categories=request.prompt,
+      **request.model_dump(exclude={"prompt", "lyrics"})
+    )
+
+    return response
+
+
+  @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
   def generate_music_with_described_lyrics(self, request: GenerateMusicWithDescribedLyricsRequest) -> GenerateMusicResponseS3:
-    pass
+
+    # Generete lyrics
+    lyrics = ""
+    if not request.instrumental:
+      lyrics = self.generate_lyrics(request.described_lyrics)
+
+    response = self.generate_and_upload_to_s3(
+      prompt=request.prompt,
+      lyrics=lyrics,
+      description_for_categories=request.prompt,
+      **request.model_dump(exclude={"prompt", "described_lyrics"})
+    )
+
+    return response
+
 
 
 @app.local_entrypoint()
 def main():
   server = MusicGenServer()
-  endpoint_url = server.generate_music.get_web_url()
+  endpoint_url = server.generate_music_with_described_lyrics.get_web_url()
 
-  response = requests.post(endpoint_url)
+  request_data = GenerateMusicWithDescribedLyricsRequest(
+    prompt="Trap, rap, hip-hop, 128 BPM, energetic, uplifting, modern.",
+    described_lyrics="A group of friends that have been separated by a war. They are trying to find each other and reunite.",
+    guidance_scale=15
+  )
+
+
+
+  payload = request_data.model_dump()
+
+  response = requests.post(endpoint_url, json=payload)
   response.raise_for_status()
 
-  result = GenerateMusicResponse(**response.json())
+  result = GenerateMusicResponseS3(**response.json())
 
-  audio_bytes = base64.b64decode(result.audio_data)
-  output_filename = "generated.wav"
-  with open(output_filename, "wb") as f:
-    f.write(audio_bytes)
-
-  print(f"Generated audio saved to {output_filename}")
+  print(f"Generated audio saved to {result.s3_key}")
+  print(f"Generated thumbnail saved to {result.cover_image_s3_key}")
+  print(f"Categories: {result.categories}")
