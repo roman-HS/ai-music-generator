@@ -20,6 +20,8 @@ export const env = createEnv({
     GENERATE_MUSIC_FROM_DESCRIPTION_ENDPOINT: z.string().url(),
     GENERATE_MUSIC_WITH_CUSTOM_LYRICS_ENDPOINT: z.string().url(),
     GENERATE_MUSIC_FROM_DESCRIBED_LYRICS_ENDPOINT: z.string().url(),
+    BETTER_AUTH_SECRET: z.string(),
+    BETTER_AUTH_URL: z.string().url(),
   },
 
   /**
@@ -50,7 +52,8 @@ export const env = createEnv({
       process.env.GENERATE_MUSIC_WITH_CUSTOM_LYRICS_ENDPOINT,
     GENERATE_MUSIC_FROM_DESCRIBED_LYRICS_ENDPOINT:
       process.env.GENERATE_MUSIC_FROM_DESCRIBED_LYRICS_ENDPOINT,
-    // NEXT_PUBLIC_CLIENTVAR: process.env.NEXT_PUBLIC_CLIENTVAR,
+    BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
+    BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
